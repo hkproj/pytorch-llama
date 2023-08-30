@@ -90,13 +90,12 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     if n_rep == 1:
         return x
     return (
-        x[:, :, :, None, :]  # (B, Seq_Len, N_KV_Heads, 1, Head_Dim)
-        .expand(
-            batch_size, seq_len, n_kv_heads, n_rep, head_dim
-        )  # (B, Seq_Len, N_KV_Heads, N_Rep, Head_Dim)
-        .reshape(
-            batch_size, seq_len, n_kv_heads * n_rep, head_dim
-        )  # (B, Seq_Len, N_KV_Heads * N_Rep, Head_Dim)
+        # (B, Seq_Len, N_KV_Heads, 1, Head_Dim)
+        x[:, :, :, None, :]
+        # (B, Seq_Len, N_KV_Heads, N_Rep, Head_Dim)
+        .expand(batch_size, seq_len, n_kv_heads, n_rep, head_dim)
+        # (B, Seq_Len, N_KV_Heads * N_Rep, Head_Dim)
+        .reshape(batch_size, seq_len, n_kv_heads * n_rep, head_dim)
     )
 
 
@@ -118,35 +117,30 @@ class Attention(nn.Module):
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
-        self.cache_k = torch.zeros(
-            (args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
-        )
-        self.cache_v = torch.zeros(
-            (args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
-        )
+        self.cache_k = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim))
+        self.cache_v = torch.zeros((args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim))
 
     def forward(
         self,
         x: torch.Tensor,
         start_pos: int,
-        freqs_complex: torch.Tensor,
-        mask: Optional[torch.Tensor],
+        freqs_complex: torch.Tensor
     ):
         batch_size, seq_len, _ = x.shape  # (B, Seq_Len, Dim)
 
-        xq = self.wq(x)  # (B, Seq_Len, Dim) -> (B, Seq_Len, H_Q * Head_Dim)
-        xk = self.wk(x)  # (B, Seq_Len, Dim) -> (B, Seq_Len, H_KV * Head_Dim)
-        xv = self.wv(x)  # (B, Seq_Len, Dim) -> (B, Seq_Len, H_KV * Head_Dim)
+        # (B, Seq_Len, Dim) -> (B, Seq_Len, H_Q * Head_Dim)
+        xq = self.wq(x)
+        # (B, Seq_Len, Dim) -> (B, Seq_Len, H_KV * Head_Dim)
+        xk = self.wk(x)
+        # (B, Seq_Len, Dim) -> (B, Seq_Len, H_KV * Head_Dim)
+        xv = self.wv(x)
 
-        xq = xq.view(
-            batch_size, seq_len, self.n_heads_q, self.head_dim
-        )  # (B, Seq_Len, H_Q * Head_Dim) -> (B, Seq_Len, H_Q, Head_Dim)
-        xk = xk.view(
-            batch_size, seq_len, self.n_kv_heads, self.head_dim
-        )  # (B, Seq_Len, H_KV * Head_Dim) -> (B, Seq_Len, H_KV, Head_Dim)
-        xv = xv.view(
-            batch_size, seq_len, self.n_kv_heads, self.head_dim
-        )  # (B, Seq_Len, H_KV * Head_Dim) -> (B, Seq_Len, H_KV, Head_Dim)
+        # (B, Seq_Len, H_Q * Head_Dim) -> (B, Seq_Len, H_Q, Head_Dim)
+        xq = xq.view(batch_size, seq_len, self.n_heads_q, self.head_dim)
+        # (B, Seq_Len, H_KV * Head_Dim) -> (B, Seq_Len, H_KV, Head_Dim)
+        xk = xk.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        # (B, Seq_Len, H_KV * Head_Dim) -> (B, Seq_Len, H_KV, Head_Dim)
+        xv = xv.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
 
         # (B, Seq_Len, H_Q, Head_Dim) --> (B, Seq_Len, H_Q, Head_Dim)
         xq = apply_rotary_embeddings(xq, freqs_complex, device=x.device)
@@ -157,45 +151,34 @@ class Attention(nn.Module):
         self.cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
         self.cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
 
-        keys = self.cache_k[
-            :batch_size, : start_pos + seq_len
-        ]  # (B, Seq_Len, H_KV, Head_Dim)
-        values = self.cache_v[
-            :batch_size, : start_pos + seq_len
-        ]  # (B, Seq_Len, H_KV, Head_Dim)
+        # (B, Seq_Len, H_KV, Head_Dim)
+        keys = self.cache_k[:batch_size, : start_pos + seq_len]
+        # (B, Seq_Len, H_KV, Head_Dim)
+        values = self.cache_v[:batch_size, : start_pos + seq_len]
 
         # Since every group of Q shares the same K and V heads, just repeat the K and V heads for every Q in the same group.
-        keys = repeat_kv(
-            keys, self.n_rep
-        )  # (B, Seq_Len, H_KV, Head_Dim) --> (B, Seq_Len, H_Q, Head_Dim)
-        values = repeat_kv(
-            values, self.n_rep
-        )  # (B, Seq_Len, H_KV, Head_Dim) --> (B, Seq_Len, H_Q, Head_Dim)
 
-        xq = xq.transpose(
-            1, 2
-        )  # (B, Seq_Len, H_Q, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
-        keys = keys.transpose(
-            1, 2
-        )  # (B, Seq_Len, H_Q, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
-        values = values.transpose(
-            1, 2
-        )  # (B, Seq_Len, H_Q, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
+        # (B, Seq_Len, H_KV, Head_Dim) --> (B, Seq_Len, H_Q, Head_Dim)
+        keys = repeat_kv(keys, self.n_rep)
+        # (B, Seq_Len, H_KV, Head_Dim) --> (B, Seq_Len, H_Q, Head_Dim)
+        values = repeat_kv(values, self.n_rep)
+
+        # (B, Seq_Len, H_Q, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
+        xq = xq.transpose(1, 2)
+        # (B, Seq_Len, H_Q, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
+        keys = keys.transpose(1, 2)
+        # (B, Seq_Len, H_Q, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
+        values = values.transpose(1, 2)
 
         # (B, H_Q, Seq_Len, Head_Dim) @ (B, H_Q, Head_Dim, Seq_Len) -> (B, H_Q, Seq_Len, Seq_Len)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        # Apply the mask if specified
-        if mask is not None:
-            scores = scores + mask
-
+        # (B, H_Q, Seq_Len, Seq_Len) -> (B, H_Q, Seq_Len, Seq_Len)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(
-            scores, values
-        )  # (B, H_Q, Seq_Len, Seq_Len) @ (B, H_Q, Seq_Len, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
-        output = (
-            output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        )  # (B, H_Q, Seq_Len, Head_Dim) -> (B, Seq_Len, H_Q, Head_Dim) -> (B, Seq_Len, Dim)
+
+        # (B, H_Q, Seq_Len, Seq_Len) @ (B, H_Q, Seq_Len, Head_Dim) -> (B, H_Q, Seq_Len, Head_Dim)
+        output = torch.matmul(scores, values)
+        # (B, H_Q, Seq_Len, Head_Dim) -> (B, Seq_Len, H_Q, Head_Dim) -> (B, Seq_Len, Dim)
+        output = (output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1))
         return self.wo(output)
 
 
@@ -247,10 +230,10 @@ class TransformerBlock(nn.Module):
         # Normalization BEFORE the feed forward block
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
     
-    def forward(self, x: torch.Tensor, start_pos: int, freqs_complex: torch.Tensor, mask: Optional[torch.Tensor]):
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_complex: torch.Tensor):
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         h = x + self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_complex, mask
+            self.attention_norm(x), start_pos, freqs_complex
         )
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
@@ -280,23 +263,16 @@ class Transformer(nn.Module):
     def forward(self, tokens: torch.Tensor, start_pos: int):
         # (B, Seq_Len)
         batch_size, seq_len = tokens.shape
+        assert seq_len == 1, "Only one token at a time can be processed"
 
         # (B, Seq_Len) -> (B, Seq_Len, Dim)
         h = self.tok_embeddings(tokens)
 
         # Retrieve the pairs (m, theta) corresponding to the positions [start_pos, start_pos + seq_len]
         freqs_complex = self.freqs_complex[start_pos:start_pos + seq_len]
-
-        mask = None
-        if seq_len > 1:
-            # Only applied to the prompt, because the successive tokens will be predicted using KV-Cache, so no need to mask
-            mask = torch.full(
-                (1, 1, seq_len, seq_len), float("-inf"), device=h.device
-            )
-            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
         
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_complex, mask)
+            h = layer(h, start_pos, freqs_complex)
         h = self.norm(h)
         output = self.output(h).float()
         return output
