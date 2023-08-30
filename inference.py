@@ -27,7 +27,7 @@ class LLaMA:
             ckpt_path = checkpoints[0]
             print(f'Loading checkpoint "{ckpt_path}"')
             checkpoint = torch.load(ckpt_path, map_location="cpu")
-            print(f"Loaded checkpoint in {time.time() - prev_time}s")
+            print(f"Loaded checkpoint in {time.time() - prev_time:.2f}s")
             prev_time = time.time()
         with open(Path(checkpoints_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
@@ -55,7 +55,7 @@ class LLaMA:
             # The only unmatched key in the checkpoint is rope.freqs. Remove it
             del checkpoint['rope.freqs']
             model.load_state_dict(checkpoint, strict=True)
-            print(f"Loaded state dict in {time.time() - prev_time}s")
+            print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
         
         return LLaMA(model, tokenizer, model_args)
 
@@ -81,15 +81,16 @@ class LLaMA:
         
         eos_reached = torch.tensor([False] * batch_size, device=device)
         prompt_tokens_mask = tokens != pad_id # True if the token is a prompt token, False otherwise
-        token_times = []
         cur_iterator = tqdm(range(1, total_len), desc="Generating tokens")
         for cur_pos in cur_iterator:
             with torch.no_grad():
                 logits = self.model.forward(tokens[:, cur_pos-1:cur_pos], cur_pos)
             if temperature > 0:
+                # The temperature is applied before the softmax
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = self._sample_top_p(probs, top_p)
             else:
+                # Greedily select the token with the max probability
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
             next_token = next_token.reshape(-1)
@@ -104,9 +105,7 @@ class LLaMA:
         out_tokens = []
         out_text = []
         for prompt_index, current_prompt_tokens in enumerate(tokens.tolist()):
-            # cut to max gen len
-            current_prompt_tokens = current_prompt_tokens[:len(prompt_tokens[prompt_index]) + max_gen_len]
-            # cut to eos tok if any
+            # Cut to the EOS token, if present
             if self.tokenizer.eos_id in current_prompt_tokens:
                 eos_idx = current_prompt_tokens.index(self.tokenizer.eos_id)
                 current_prompt_tokens = current_prompt_tokens[:eos_idx]
@@ -127,14 +126,27 @@ class LLaMA:
 
 
 if __name__ == '__main__':
+    torch.manual_seed(0)
+
     allow_cuda = False
     device = 'cuda' if torch.cuda.is_available() and allow_cuda else 'cpu'
+
+    prompts = [
+        "Simply put, the theory of relativity states that ",
+        "If Google was an Italian company founded in Milan, it would"
+    ]
+
     model = LLaMA.build(
         checkpoints_dir='llama-2-7b/',
         tokenizer_path='tokenizer.model',
         load_model=True,
         max_seq_len=1024,
-        max_batch_size=1,
+        max_batch_size=len(prompts),
         device=device
     )
-    print(model.text_completion(['PyTorch is'], max_gen_len=64))
+
+    out_tokens, out_texts = (model.text_completion(prompts, max_gen_len=64))
+    assert len(out_texts) == len(prompts)
+    for i in range(len(out_texts)):
+        print(f'{out_texts[i]}')
+
