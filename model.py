@@ -41,7 +41,7 @@ class RMSNorm(nn.Module):
         return self.weight * self._norm(x.float()).type_as(x)
 
 
-def precompute_frequencies(dim: int, seq_len: int, device: str, theta: float = 10000.0):
+def precompute_theta_pos_frequencies(dim: int, seq_len: int, device: str, theta: float = 10000.0):
     # As written in the paragraph 3.2.2 of the paper
     # >> In order to generalize our results in 2D to any xi ∈ Rd where **d is even**, [...]
     assert dim % 2 == 0, "Dimension must be divisible by 2"
@@ -99,7 +99,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-class Attention(nn.Module):
+class SelfAttention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
 
@@ -212,7 +212,7 @@ class FeedForward(nn.Module):
         return x
 
 
-class TransformerBlock(nn.Module):
+class EncoderBlock(nn.Module):
 
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
@@ -221,7 +221,7 @@ class TransformerBlock(nn.Module):
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
 
-        self.attention = Attention(args)
+        self.attention = SelfAttention(args)
         self.feed_forward = FeedForward(args)
 
         self.layer_id = layer_id
@@ -253,12 +253,12 @@ class Transformer(nn.Module):
 
         self.layers = nn.ModuleList()
         for layer_id in range(args.n_layers):
-            self.layers.append(TransformerBlock(layer_id, args))
+            self.layers.append(EncoderBlock(layer_id, args))
 
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.output = nn.Linear(args.dim, self.vocab_size, bias=False)
 
-        self.freqs_complex = precompute_frequencies(self.args.dim // self.args.n_heads, self.args.max_seq_len* 2, device=self.args.device)
+        self.freqs_complex = precompute_theta_pos_frequencies(self.args.dim // self.args.n_heads, self.args.max_seq_len* 2, device=self.args.device)
 
     def forward(self, tokens: torch.Tensor, start_pos: int):
         # (B, Seq_Len)
@@ -271,6 +271,7 @@ class Transformer(nn.Module):
         # Retrieve the pairs (m, theta) corresponding to the positions [start_pos, start_pos + seq_len]
         freqs_complex = self.freqs_complex[start_pos:start_pos + seq_len]
         
+        # Consecutively apply all the encoder layers
         for layer in self.layers:
             h = layer(h, start_pos, freqs_complex)
         h = self.norm(h)
