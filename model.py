@@ -12,7 +12,8 @@ class ModelArgs:
     n_layers: int = 32
     n_heads: int = 32
     n_kv_heads: Optional[int] = None
-    vocab_size: int = -1
+    vocab_size: int = -1 # Later set in the build method
+    multiple_of: int = 256
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
 
@@ -119,10 +120,10 @@ class Attention(nn.Module):
 
         self.cache_k = torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
-        ).to(args.device)
+        )
         self.cache_v = torch.zeros(
             (args.max_batch_size, args.max_seq_len, self.n_kv_heads, self.head_dim)
-        ).to(args.device)
+        )
 
     def forward(
         self,
@@ -201,21 +202,20 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(
         self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: Optional[float],
+        args: ModelArgs
     ):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        # Round the hidden_dim to the nearest multiple of the multiple_of parameter
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        hidden_dim = 4 * args.dim
+        hidden_dim = int(2 * hidden_dim / 3)
+        if args.ffn_dim_multiplier is not None:
+            hidden_dim = int(args.ffn_dim_multiplier * hidden_dim)
+        # Round the hidden_dim to the nearest multiple of the multiple_of parameter
+        hidden_dim = args.multiple_of * ((hidden_dim + args.multiple_of - 1) // args.multiple_of)
+
+        self.w1 = nn.Linear(args.dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, args.dim, bias=False)
+        self.w3 = nn.Linear(args.dim, hidden_dim, bias=False)
 
     def forward(self, x: torch.Tensor):
         # (B, Seq_Len, Dim) --> (B, Seq_Len, Hidden_Dim)
@@ -232,18 +232,14 @@ class FeedForward(nn.Module):
 class TransformerBlock(nn.Module):
 
     def __init__(self, layer_id: int, args: ModelArgs):
+        super().__init__()
+
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
 
         self.attention = Attention(args)
-
-        self.feed_forward = FeedForward(
-            dim=args.dim,
-            hidden_dim=4 * args.dim,
-            multiple_of=args.multiple_of,
-            ffn_dim_multiplier=args.ffn_dim_multiplier,
-        )
+        self.feed_forward = FeedForward(args)
 
         self.layer_id = layer_id
         # Normalization BEFORE the attention block
@@ -262,22 +258,24 @@ class TransformerBlock(nn.Module):
     
 class Transformer(nn.Module):
 
-    def __init__(self, params: ModelArgs):
+    def __init__(self, args: ModelArgs):
         super().__init__()
 
-        self.params = params
-        self.vocab_size = params.vocab_size
-        self.n_layers = params.n_layers
-        self.tok_embeddings = nn.Embedding(self.vocab_size, params.dim)
+        assert args.vocab_size != -1, "Vocab size must be set"
+
+        self.args = args
+        self.vocab_size = args.vocab_size
+        self.n_layers = args.n_layers
+        self.tok_embeddings = nn.Embedding(self.vocab_size, args.dim)
 
         self.layers = nn.ModuleList()
-        for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
+        for layer_id in range(args.n_layers):
+            self.layers.append(TransformerBlock(layer_id, args))
 
-        self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = nn.Linear(params.dim, self.vocab_size, bias=False)
+        self.norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.output = nn.Linear(args.dim, self.vocab_size, bias=False)
 
-        self.freqs_comlex = precompute_frequencies(self.params.dim // self.params.n_heads, self.params.max_seq_len* 2, device=self.params.device)
+        self.freqs_complex = precompute_frequencies(self.args.dim // self.args.n_heads, self.args.max_seq_len* 2, device=self.args.device)
 
     def forward(self, tokens: torch.Tensor, start_pos: int):
         # (B, Seq_Len)
