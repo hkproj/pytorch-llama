@@ -1,2 +1,2 @@
 # pytorch-llama
-LLaMA implemented from scratch in PyTorch
+LLaMA 2 implemented from scratch in PyTorch
